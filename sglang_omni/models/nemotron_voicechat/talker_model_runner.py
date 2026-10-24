@@ -52,96 +52,49 @@ class NemotronVoiceChatTalkerModelRunner(ModelRunner):
     def fusion_device(self) -> torch.device:
         return self.model.fusion_buffer.device
 
+    def character_ids_for_token(self, token_id: int) -> list[int]:
+        return [
+            self.char_vocab[character]
+            for character in (self.tokenizer.convert_ids_to_tokens(token_id) or "")
+            if character in self.char_vocab
+        ] or [self.char_padding_idx]
+
     def initialize_character_lookup(self) -> None:
-        self.token_id_count: int = (
-            max(self.tokenizer.get_vocab().values(), default=-1) + 1
-        )
-        character_sequences = [
-            [
-                self.char_vocab[character]
-                for character in (self.tokenizer.convert_ids_to_tokens(token_id) or "")
-                if character in self.char_vocab
-            ]
-            or [self.char_padding_idx]
-            for token_id in range(self.token_id_count)
+        token_id_count = max(self.tokenizer.get_vocab().values(), default=-1) + 1
+        self.character_ids_by_token: list[list[int]] = [
+            self.character_ids_for_token(token_id) for token_id in range(token_id_count)
         ]
-        self.character_lengths_cpu: list[int] = [
-            len(sequence) for sequence in character_sequences
-        ]
-        character_ids_cpu = torch.full(
-            (len(character_sequences), max(self.character_lengths_cpu, default=1)),
-            self.char_padding_idx,
-            dtype=torch.long,
-            device="cpu",
-        )
-        for row, sequence in enumerate(character_sequences):
-            character_ids_cpu[row, : len(sequence)] = torch.tensor(
-                sequence, dtype=torch.long, device="cpu"
-            )
-        device = self.fusion_device()
-        self.token_ids_by_token: torch.Tensor = torch.arange(
-            self.token_id_count, dtype=torch.long, device=device
-        )
-        self.character_ids_by_token: torch.Tensor = character_ids_cpu.to(device)
-        self.character_lengths_by_token: torch.Tensor = torch.tensor(
-            self.character_lengths_cpu, dtype=torch.long, device=device
-        )
 
     def char_batch(
         self, token_ids: list[int]
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        if len(token_ids) == 1 and 0 <= token_ids[0] < self.token_id_count:
-            token_id = token_ids[0]
-            character_width = self.character_lengths_cpu[token_id]
-            return (
-                self.token_ids_by_token[token_id : token_id + 1],
-                self.character_ids_by_token[token_id : token_id + 1, :character_width],
-                self.character_lengths_by_token[token_id : token_id + 1],
+        character_sequences = [
+            (
+                self.character_ids_by_token[token_id]
+                if 0 <= token_id < len(self.character_ids_by_token)
+                else self.character_ids_for_token(token_id)
             )
-        elif all(0 <= token_id < self.token_id_count for token_id in token_ids):
-            character_width = max(
-                self.character_lengths_cpu[token_id] for token_id in token_ids
-            )
-            batch_token_ids = torch.tensor(token_ids, device=self.fusion_device())
-            return (
-                batch_token_ids,
-                self.character_ids_by_token[:, :character_width].index_select(
-                    0, batch_token_ids
-                ),
-                self.character_lengths_by_token.index_select(0, batch_token_ids),
-            )
-        else:
-            device = self.fusion_device()
-            character_sequences = [
-                [
-                    self.char_vocab[character]
-                    for character in (
-                        self.tokenizer.convert_ids_to_tokens(token_id) or ""
-                    )
-                    if character in self.char_vocab
-                ]
-                or [self.char_padding_idx]
-                for token_id in token_ids
-            ]
-            character_width = max(len(sequence) for sequence in character_sequences)
-            character_ids = torch.full(
-                (len(character_sequences), character_width),
-                self.char_padding_idx,
-                dtype=torch.long,
-                device=device,
-            )
-            for row, sequence in enumerate(character_sequences):
-                character_ids[row, : len(sequence)] = torch.tensor(
-                    sequence, device=device
-                )
-            character_lengths = torch.tensor(
-                [len(sequence) for sequence in character_sequences], device=device
-            )
-            return (
-                torch.tensor(token_ids, device=device),
-                character_ids,
-                character_lengths,
-            )
+            for token_id in token_ids
+        ]
+        character_lengths = [len(sequence) for sequence in character_sequences]
+        character_width = max(character_lengths)
+        padded_character_ids = [
+            character_id
+            for sequence in character_sequences
+            for character_id in sequence
+            + [self.char_padding_idx] * (character_width - len(sequence))
+        ]
+        batch_tensor = torch.tensor(
+            token_ids + character_lengths + padded_character_ids,
+            dtype=torch.long,
+            device=self.fusion_device(),
+        )
+        batch_size = len(token_ids)
+        return (
+            batch_tensor[:batch_size],
+            batch_tensor[2 * batch_size :].view(batch_size, character_width),
+            batch_tensor[batch_size : 2 * batch_size],
+        )
 
     def warmup(self):
         if self.warmup_rows is None:

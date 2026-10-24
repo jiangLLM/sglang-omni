@@ -233,3 +233,22 @@ def test_empty_batch_retains_error(
         original_char_batch(sparse_runner, [])
     with pytest.raises(ValueError):
         sparse_runner.char_batch([])
+
+
+@pytest.mark.parametrize("token_ids", [[5], [5, 0, 5]])
+def test_character_batches_do_not_share_mutable_values(
+    sparse_runner: NemotronVoiceChatTalkerModelRunner, token_ids: list[int]
+) -> None:
+    """A caller's tensor edits must not change another character batch."""
+    expected_batch = original_char_batch(sparse_runner, token_ids)
+    token_tensor, character_tensor, length_tensor = sparse_runner.char_batch(token_ids)
+    character_tensor.fill_(sparse_runner.char_padding_idx)
+    torch.testing.assert_close(token_tensor, expected_batch[0], rtol=0, atol=0)
+    torch.testing.assert_close(length_tensor, expected_batch[2], rtol=0, atol=0)
+    token_tensor.fill_(0)
+    length_tensor.fill_(0)
+    actual_batch = sparse_runner.char_batch(token_ids)
+    for actual_tensor, expected_tensor in zip(
+        actual_batch, expected_batch, strict=True
+    ):
+        torch.testing.assert_close(actual_tensor, expected_tensor, rtol=0, atol=0)
