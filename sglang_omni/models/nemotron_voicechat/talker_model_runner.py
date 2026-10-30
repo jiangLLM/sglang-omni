@@ -1,42 +1,37 @@
 from __future__ import annotations
 
 import torch
-from transformers import AutoTokenizer, PreTrainedTokenizerBase
+from transformers import AutoTokenizer
 
 from sglang_omni.model_runner.base import ModelRunner
-from sglang_omni.model_runner.model_worker import ModelWorker
 from sglang_omni.model_runner.prefill_inputs import (
     OmniPrefillInputs,
     attach_omni_prefill_inputs,
 )
-from sglang_omni.scheduling.sglang_backend.output_processor import SGLangOutputProcessor
 
 NUM_ITER = 8
 
 
-def char_vocab_from_tokenizer(tokenizer: PreTrainedTokenizerBase) -> dict[str, int]:
-    token_vocabulary = tokenizer.get_vocab()
-    characters = sorted(
-        (token for token in token_vocabulary if len(token) == 1),
-        key=lambda token: token_vocabulary[token],
+def char_vocab_from_tokenizer(tokenizer) -> dict[str, int]:
+    vocab = tokenizer.get_vocab()
+    chars = sorted(
+        (token for token in vocab if len(token) == 1), key=lambda t: vocab[t]
     )
-    return {character: index for index, character in enumerate(characters)}
+    return {char: index for index, char in enumerate(chars)}
 
 
 class VoiceChatTalkerModelRunner(ModelRunner):
-    def __init__(
-        self, tp_worker: ModelWorker, output_processor: SGLangOutputProcessor
-    ) -> None:
+    def __init__(self, tp_worker, output_processor):
         super().__init__(tp_worker, output_processor)
         speech = self.model.config.nemotron_speech
-        self.tokenizer: PreTrainedTokenizerBase = AutoTokenizer.from_pretrained(
+        self.tokenizer = AutoTokenizer.from_pretrained(
             speech["tokenizer_name"],
             bos_token=speech.get("bos_token"),
             eos_token=speech.get("eos_token"),
             pad_token=speech.get("pad_token"),
         )
-        self.char_vocab: dict[str, int] = char_vocab_from_tokenizer(self.tokenizer)
-        self.char_padding_idx: int = len(self.char_vocab)
+        self.char_vocab = char_vocab_from_tokenizer(self.tokenizer)
+        self.char_padding_idx = len(self.char_vocab)
         self.initialize_character_lookup()
         # From the checkpoint's names above: the tokenizer's own eos_token_id
         # is <SPECIAL_12>, the text channel's PAD, which means still speaking.
